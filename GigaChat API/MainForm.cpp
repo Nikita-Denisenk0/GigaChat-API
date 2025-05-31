@@ -1,4 +1,4 @@
-#include "MainForm.h"
+﻿#include "MainForm.h"
 #include <iostream>
 #include <msclr/marshal_cppstd.h>
 #include <curl/curl.h>
@@ -17,10 +17,9 @@ using namespace System::Windows::Forms;
 using namespace System::Text;
 using namespace System::Drawing;
 
+std::vector<nlohmann::json> messageHistory; // История сообщений для поддержки контекста диалога
 
-std::vector<nlohmann::json> messageHistory; // ������� ���������
-
-// ��������� UUID
+// Генерация UUID для запросов
 std::string generate_uuid() {
     std::random_device rd;
     std::mt19937 gen(rd());
@@ -41,13 +40,13 @@ std::string generate_uuid() {
     return uuid.str();
 }
 
-// Callback ��� CURL
+// Callback-функция для записи ответа от CURL
 static size_t write_callback(void* data, size_t size, size_t nmemb, void* userp) {
     ((std::string*)userp)->append((char*)data, size * nmemb);
     return size * nmemb;
 }
 
-// ��������� ������ �������
+// Получение токена доступа для API GigaChat
 std::string get_access_token() {
     const std::string CLIENT_SECRET = "MjU5Y2I5NTEtOGQ1YS00ODQzLWFhZmEtNWIyNzIyYTY1YmM0OmQ2OTIxMDY0LTdiYzEtNDY4Yy1hYzRmLTYyMzg2MWMwODljOQ==";
     const std::string OAUTH_URL = "https://ngw.devices.sberbank.ru:9443/api/v2/oauth";
@@ -95,12 +94,12 @@ std::string get_access_token() {
     }
 }
 
-// �������� ������� � GigaChat � ������ ���������
+// Отправка запроса в GigaChat с учетом контекста
 std::string query_gigachat(const std::string& prompt, const std::string& token) {
     const std::string API_URL = "https://gigachat.devices.sberbank.ru/api/v1/chat/completions";
     if (token.empty()) return "";
 
-    // ��������� ����� ������ � �������
+    // Добавляем новый запрос в историю
     messageHistory.push_back({ {"role", "user"}, {"content", prompt} });
 
     CURL* curl = curl_easy_init();
@@ -144,9 +143,9 @@ std::string query_gigachat(const std::string& prompt, const std::string& token) 
         nlohmann::json response_data = nlohmann::json::parse(response);
         std::string answer = response_data["choices"][0]["message"]["content"].get<std::string>();
 
-        // ��������� ����� � ������� � ������������ ������
+        // Добавляем ответ в историю и ограничиваем размер
         messageHistory.push_back({ {"role", "assistant"}, {"content", answer} });
-        if (messageHistory.size() > 10) {
+        if (messageHistory.size() > 6) {
             messageHistory.erase(messageHistory.begin(), messageHistory.begin() + 2);
         }
 
@@ -157,14 +156,14 @@ std::string query_gigachat(const std::string& prompt, const std::string& token) 
     }
 }
 
-// ����������� System::String^ � UTF-8
+// Конвертация System::String^ в UTF-8
 std::string ConvertToUTF8(System::String^ input) {
     array<unsigned char>^ bytes = Encoding::UTF8->GetBytes(input);
     pin_ptr<unsigned char> pinned = &bytes[0];
     return std::string(reinterpret_cast<char*>(pinned), bytes->Length);
 }
 
-// ����������� UTF-8 � System::String^
+// Конвертация UTF-8 в System::String^
 System::String^ ConvertFromUTF8(const std::string& input) {
     array<unsigned char>^ bytes = gcnew array<unsigned char>(static_cast<int>(input.size()));
     for (size_t i = 0; i < input.size(); ++i)
@@ -172,59 +171,143 @@ System::String^ ConvertFromUTF8(const std::string& input) {
     return Encoding::UTF8->GetString(bytes);
 }
 
-// ���������� ������ ��������
+// Добавление сообщений с форматированием в историю чата
+void AddMessageToHistory(RichTextBox^ outputField, System::String^ message, bool isUser) {
+    Color textColor = isUser ? Color::FromArgb(74, 108, 247) : Color::FromArgb(31, 41, 55);
+    String^ prefix = isUser ? "[Вы] " : "[GigaChat] ";
+
+    // Установка стиля для префикса (жирный)
+    outputField->SelectionStart = outputField->TextLength;
+    outputField->SelectionColor = textColor;
+    outputField->SelectionFont = gcnew System::Drawing::Font("Segoe UI", 10.8F, FontStyle::Bold);
+    outputField->AppendText(prefix);
+
+    // Установка стиля для основного текста (обычный)
+    outputField->SelectionStart = outputField->TextLength;
+    outputField->SelectionColor = Color::FromArgb(75, 85, 99);
+    outputField->SelectionFont = gcnew System::Drawing::Font("Segoe UI", 10.8F);
+    outputField->AppendText(message + "\n\n");
+
+    // Автоматическая прокрутка к последнему сообщению
+    outputField->SelectionStart = outputField->TextLength;
+    outputField->ScrollToCaret();
+}
+
+// Обработчик кнопки отправки сообщения
 System::Void MainForm::button1_Click(System::Object^ sender, System::EventArgs^ e) {
     try {
-        std::string prompt = ConvertToUTF8(inputField->Text->Trim());
-        if ((prompt).length() == 0 || prompt == "Enter your query...") {
-            MessageBox::Show("Enter your request text!", "Error",
+        // Проверка на пустое сообщение
+        if (inputField->Text == "Введите ваш запрос..." || String::IsNullOrWhiteSpace(inputField->Text)) {
+            MessageBox::Show("Введите текст вашего запроса!", "Ошибка",
                 MessageBoxButtons::OK, MessageBoxIcon::Warning);
             return;
         }
 
+        std::string prompt = ConvertToUTF8(inputField->Text);
+
+        // Добавляем сообщение пользователя в историю
+        AddMessageToHistory(outputField, inputField->Text, true);
+
+        // Показываем индикатор печати
+        statusLabel->Text = "GigaChat печатает...";
+        dotCount = 0;
+        inputField->Clear();
+        typingTimer->Start();
+        Application::DoEvents(); // Принудительное обновление UI
+
+        // Получение токена доступа
         std::string token = get_access_token();
         if (token.empty()) {
-            MessageBox::Show("Authorization error!", "Error",
+            typingTimer->Stop();
+            MessageBox::Show("Ошибка авторизации!", "Ошибка",
                 MessageBoxButtons::OK, MessageBoxIcon::Error);
+            statusLabel->Text = "Ошибка авторизации";
             return;
         }
 
+        // Отправка запроса в GigaChat API
         std::string response = query_gigachat(prompt, token);
         if (response.empty()) {
-            MessageBox::Show("Error receiving response!", "Error",
+            typingTimer->Stop();
+            MessageBox::Show("Ошибка получения ответа!", "Ошибка",
                 MessageBoxButtons::OK, MessageBoxIcon::Error);
+            statusLabel->Text = "Ошибка получения ответа";
             return;
         }
 
-        outputField->Text = ConvertFromUTF8(response);
-        inputField->Clear();
+        // Добавляем ответ в историю
+        typingTimer->Stop();
+        statusLabel->Text = "Готов к работе";
+        AddMessageToHistory(outputField, ConvertFromUTF8(response), false);
     }
     catch (const std::exception& ex) {
-        MessageBox::Show(gcnew System::String(ex.what()), "Error",
+        typingTimer->Stop();
+        MessageBox::Show(gcnew System::String(ex.what()), "Ошибка",
             MessageBoxButtons::OK, MessageBoxIcon::Error);
+        statusLabel->Text = "Ошибка: " + gcnew System::String(ex.what());
     }
     catch (...) {
-        MessageBox::Show("Unknown error!", "Error",
+        typingTimer->Stop();
+        MessageBox::Show("Неизвестная ошибка!", "Ошибка",
             MessageBoxButtons::OK, MessageBoxIcon::Error);
+        statusLabel->Text = "Неизвестная ошибка";
     }
 }
 
-// ������������� CURL
+// Инициализация при загрузке формы
 System::Void MainForm::MainForm_Load(System::Object^ sender, System::EventArgs^ e) {
-    curl_global_init(CURL_GLOBAL_DEFAULT);
-    inputField->Text = "Enter your query...";
+    curl_global_init(CURL_GLOBAL_DEFAULT); // Инициализация CURL
+    inputField->Text = "Введите ваш запрос...";
+    inputField->ForeColor = Color::FromArgb(156, 163, 175); // Серый цвет плейсхолдера
+    outputField->BackColor = Color::FromArgb(249, 250, 251); // Светлый фон истории
 }
 
-// ������� CURL
-System::Void MainForm::MainForm_FormClosing(System::Object^ sender,
-    FormClosingEventArgs^ e) {
-    curl_global_cleanup();
+// Очистка ресурсов при закрытии формы
+System::Void MainForm::MainForm_FormClosing(System::Object^ sender, FormClosingEventArgs^ e) {
+    curl_global_cleanup(); // Очистка CURL
 }
 
-// ������ ����������� �������
-//System::Void MainForm::label1_Click(System::Object^ sender, System::EventArgs^ e) {}
-//System::Void MainForm::outputField_TextChanged(System::Object^ sender, System::EventArgs^ e) {}
+// Обработчик получения фокуса полем ввода
+System::Void MainForm::inputField_Enter(System::Object^ sender, System::EventArgs^ e) {
+    // Очистка плейсхолдера
+    if (inputField->Text == "Введите ваш запрос...") {
+        inputField->Text = "";
+        inputField->ForeColor = SystemColors::WindowText; // Стандартный цвет текста
+    }
+}
 
+// Обработчик потери фокуса полем ввода
+System::Void MainForm::inputField_Leave(System::Object^ sender, System::EventArgs^ e) {
+    // Восстановление плейсхолдера
+    if (String::IsNullOrWhiteSpace(inputField->Text)) {
+        inputField->Text = "Введите ваш запрос...";
+        inputField->ForeColor = Color::FromArgb(156, 163, 175); // Серый цвет
+    }
+}
+
+// Обработчик нажатия клавиш в поле ввода
+System::Void MainForm::inputField_KeyDown(System::Object^ sender, KeyEventArgs^ e) {
+    // Отправка сообщения по Enter (без Shift)
+    if (e->KeyCode == Keys::Enter && !e->Shift) {
+        e->SuppressKeyPress = true; // Предотвращаем звук системы
+        button1_Click(sender, e);   // Вызов обработчика отправки
+    }
+}
+
+// Обработчик тика таймера для анимации печати
+System::Void MainForm::typingTimer_Tick(System::Object^ sender, System::EventArgs^ e) {
+    dotCount = (dotCount % 3) + 1; // Цикл 1-2-3
+    statusLabel->Text = "GigaChat печатает" + gcnew String('.', dotCount);
+}
+
+// Очистка истории сообщений
+System::Void MainForm::clearButton_Click(System::Object^ sender, System::EventArgs^ e) {
+    outputField->Clear();
+    messageHistory.clear();
+    statusLabel->Text = "История очищена";
+}
+
+// Точка входа приложения
 [STAThread]
 int main() {
     Application::EnableVisualStyles();
