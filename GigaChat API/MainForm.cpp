@@ -219,8 +219,8 @@ System::Void MainForm::button1_Click(System::Object^ sender, System::EventArgs^ 
         std::string token = get_access_token();
         if (token.empty()) {
             typingTimer->Stop();
-            MessageBox::Show("Ошибка авторизации!", "Ошибка",
-                MessageBoxButtons::OK, MessageBoxIcon::Error);
+            MessageBox::Show("Не удалось получить токен! Проверьте интернет соединение!", "Ошибка",
+                MessageBoxButtons::OK, MessageBoxIcon::Warning);
             statusLabel->Text = "Ошибка авторизации";
             return;
         }
